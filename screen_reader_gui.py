@@ -1,12 +1,10 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import threading
 import time
 import webbrowser
 import uiautomation as auto
 import keyboard
 import win32com.client
-
 
 class ScreenReaderApp:
     def __init__(self, root):
@@ -15,7 +13,6 @@ class ScreenReaderApp:
         self.root.geometry("700x630")
         self.root.minsize(600, 500)
 
-
         self.bg_color = "#1e1e1e"
         self.fg_color = "#f0f0f0"
         self.button_bg = "#3c3f41"
@@ -23,22 +20,17 @@ class ScreenReaderApp:
         self.entry_bg = "#2d2d2d"
         self.root.configure(bg=self.bg_color)
 
-
         self.voice = win32com.client.Dispatch("SAPI.SpVoice")
         self.voices = self.voice.GetVoices()
         self.current_voice_index = 0
-        self.rate = 0   
+        self.rate = 0
         self.volume = 100
 
-
         self.setup_hotkeys()
-
-  
         self.create_widgets()
 
-
         self.update_voices_list()
-        self.speed_scale.set(0)          
+        self.speed_scale.set(0)
         self.volume_scale.set(100)
 
         self.log("Диктор запущен (SAPI5). Горячие клавиши активны.\n"
@@ -56,43 +48,30 @@ class ScreenReaderApp:
         except Exception as e:
             messagebox.showwarning("Предупреждение", f"Не удалось установить глобальные горячие клавиши.\nВозможно, нужны права администратора.\nОшибка: {e}")
 
-   
     def speak(self, text, log_it=True):
-        """Озвучивание текста с возможностью логирования."""
         if not text or not text.strip():
             return
         if log_it:
             self.log(f"Диктор: {text}")
-        # Останавливаем предыдущую речь, если она ещё звучит
-        if self.voice.IsSpeaking():
-            self.voice.Speak("", 3)   # метод остановки
-        # Запускаем новую речь асинхронно
-        self.voice.Speak(text, 1)     # 1 = асинхронный режим
+        self.voice.Speak("", 3)   # остановить предыдущую речь
+        self.voice.Speak(text, 1) # асинхронно
 
     def stop_reading(self):
-        """Остановить текущее чтение."""
-        if self.voice.IsSpeaking():
-            self.voice.Speak("", 3)   # немедленная остановка
-            self.log("Чтение остановлено пользователем.")
-        else:
-            self.log("Речи не было, нечего останавливать.")
+        self.voice.Speak("", 3)
+        self.log("Чтение остановлено пользователем.")
 
     def log(self, message):
-        """Вывод сообщения в текстовое поле лога."""
         timestamp = time.strftime("%H:%M:%S")
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.log_text.see(tk.END)
-        self.root.update_idletasks()
 
-    
+    # ---------- Работа с браузером (UIAutomation) ----------
     def get_browser_window(self):
-        """Находит окно браузера (Chrome, Firefox, Edge)."""
         browser_classes = ['Chrome_WidgetWin_1', 'MozillaWindowClass', 'ApplicationFrameWindow']
         for class_name in browser_classes:
             win = auto.Control(ClassName=class_name, Name='.*', depth=1)
             if win.Exists(3, 0.5):
                 return win
-      
         for win in auto.GetRootControl().GetChildren():
             title = win.Name
             if title and any(b in title.lower() for b in ['chrome', 'firefox', 'edge', 'mozilla', 'браузер']):
@@ -100,11 +79,9 @@ class ScreenReaderApp:
         return None
 
     def get_browser_address(self):
-        """Извлекает текущий URL из адресной строки браузера."""
         browser = self.get_browser_window()
         if not browser:
             return None
-       
         address_edit = None
         def find_address(ctrl):
             nonlocal address_edit
@@ -119,15 +96,17 @@ class ScreenReaderApp:
             return False
         find_address(browser)
         if address_edit:
-            value_pattern = address_edit.GetValuePattern()
-            if value_pattern:
-                return value_pattern.Value
+            try:
+                value_pattern = address_edit.GetPattern(auto.ValuePattern)
+                if value_pattern:
+                    return value_pattern.CurrentValue
+            except:
+                pass
             if address_edit.Name and ('http' in address_edit.Name or 'www' in address_edit.Name):
                 return address_edit.Name
         return None
 
     def get_all_text_from_window(self, control):
-        """Рекурсивно собирает текст из всех текстовых элементов окна."""
         texts = []
         if not control:
             return texts
@@ -140,7 +119,6 @@ class ScreenReaderApp:
             for child in ctrl.GetChildren():
                 walk(child)
         walk(control)
-
         unique = []
         prev = ""
         for t in texts:
@@ -150,7 +128,6 @@ class ScreenReaderApp:
         return unique
 
     def read_browser_content(self):
-        """Прочитать всё содержимое активного окна браузера."""
         browser = self.get_browser_window()
         if not browser:
             self.speak("Браузер не найден. Откройте Chrome, Firefox или Edge.")
@@ -166,14 +143,16 @@ class ScreenReaderApp:
         self.speak(full_text)
 
     def read_focused_element(self):
-        """Озвучить элемент, находящийся в фокусе (после Tab или клика)."""
         focused = auto.GetFocusedControl()
         if focused:
             text = focused.Name
             if not text:
-                val = focused.GetValuePattern()
-                if val:
-                    text = val.Value
+                try:
+                    value_pattern = focused.GetPattern(auto.ValuePattern)
+                    if value_pattern:
+                        text = value_pattern.CurrentValue
+                except:
+                    pass
             if text and text.strip():
                 self.speak(text)
             else:
@@ -182,15 +161,17 @@ class ScreenReaderApp:
             self.speak("Нет элемента в фокусе")
 
     def read_element_under_cursor(self):
-        """Озвучить элемент под курсором мыши."""
-        cursor_pos = auto.GetCursorPos()
-        elem = auto.ControlFromPoint(cursor_pos)
+        x, y = auto.GetCursorPos()
+        elem = auto.ControlFromPoint(x, y)
         if elem:
             text = elem.Name
             if not text:
-                val = elem.GetValuePattern()
-                if val:
-                    text = val.Value
+                try:
+                    value_pattern = elem.GetPattern(auto.ValuePattern)
+                    if value_pattern:
+                        text = value_pattern.CurrentValue
+                except:
+                    pass
             if text and text.strip():
                 self.speak(text)
             else:
@@ -199,16 +180,14 @@ class ScreenReaderApp:
             self.speak("Не удалось определить элемент под курсором")
 
     def read_current_url(self):
-        """Прочитать адресную строку активного браузера."""
         url = self.get_browser_address()
         if url:
             self.speak(f"Адрес текущей страницы: {url}")
         else:
             self.speak("Не удалось получить адресную строку. Убедитесь, что открыт Chrome или Edge.")
 
-  
+    # ---------- Настройки речи ----------
     def update_voices_list(self):
-        """Обновить список доступных голосов в комбобоксе."""
         voice_names = [v.GetDescription() for v in self.voices]
         self.voice_combo['values'] = voice_names
         if voice_names:
@@ -217,7 +196,6 @@ class ScreenReaderApp:
             self.voice.Voice = self.voices[0]
 
     def change_voice(self, event=None):
-        """Сменить голос."""
         selected = self.voice_combo.get()
         for i, v in enumerate(self.voices):
             if v.GetDescription() == selected:
@@ -227,19 +205,16 @@ class ScreenReaderApp:
                 break
 
     def change_speed(self, val):
-        """Изменить скорость речи (SAPI5: -10..10)."""
         self.rate = int(float(val))
         self.voice.Rate = self.rate
         self.speed_label.config(text=f"Скорость: {self.rate}")
 
     def change_volume(self, val):
-        """Изменить громкость (0..100)."""
         self.volume = int(float(val))
         self.voice.Volume = self.volume
         self.volume_label.config(text=f"Громкость: {self.volume}%")
 
     def open_url(self):
-        """Открыть введённый URL в браузере по умолчанию."""
         url = self.url_entry.get().strip()
         if not url:
             self.log("Введите адрес (например, https://example.com)")
@@ -252,16 +227,14 @@ class ScreenReaderApp:
         except Exception as e:
             self.log(f"Ошибка открытия браузера: {e}")
 
-
+    # ---------- GUI ----------
     def create_widgets(self):
         main_frame = tk.Frame(self.root, bg=self.bg_color)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
 
-
         title_label = tk.Label(main_frame, text="Экранный диктор для слабовидящих",
                                font=("Arial", 18, "bold"), bg=self.bg_color, fg=self.fg_color)
         title_label.pack(pady=(0,15))
-
 
         url_frame = tk.LabelFrame(main_frame, text="Адресная строка", font=("Arial", 12),
                                   bg=self.bg_color, fg=self.fg_color, bd=2, relief=tk.GROOVE)
@@ -277,7 +250,6 @@ class ScreenReaderApp:
                                  bg=self.button_bg, fg=self.fg_color, font=("Arial", 10),
                                  activebackground=self.button_active_bg)
         read_url_btn.pack(side=tk.RIGHT, padx=5, pady=10)
-
 
         control_frame = tk.LabelFrame(main_frame, text="Управление чтением", font=("Arial", 12),
                                       bg=self.bg_color, fg=self.fg_color, bd=2, relief=tk.GROOVE)
@@ -311,7 +283,6 @@ class ScreenReaderApp:
         self.speed_label = tk.Label(speed_frame, text="Скорость: 0", bg=self.bg_color, fg=self.fg_color, font=("Arial", 10))
         self.speed_label.pack(side=tk.LEFT)
 
-    
         vol_frame = tk.Frame(settings_frame, bg=self.bg_color)
         vol_frame.pack(fill=tk.X, padx=10, pady=5)
         tk.Label(vol_frame, text="Громкость:", bg=self.bg_color, fg=self.fg_color, font=("Arial", 10)).pack(side=tk.LEFT)
@@ -322,7 +293,6 @@ class ScreenReaderApp:
         self.volume_label = tk.Label(vol_frame, text="Громкость: 100%", bg=self.bg_color, fg=self.fg_color, font=("Arial", 10))
         self.volume_label.pack(side=tk.LEFT)
 
-  
         voice_frame = tk.Frame(settings_frame, bg=self.bg_color)
         voice_frame.pack(fill=tk.X, padx=10, pady=5)
         tk.Label(voice_frame, text="Голос:", bg=self.bg_color, fg=self.fg_color, font=("Arial", 10)).pack(side=tk.LEFT)
@@ -340,11 +310,9 @@ class ScreenReaderApp:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Подсказка
         hint_label = tk.Label(main_frame, text="Горячие клавиши: Ctrl+Shift+R (страница) | F (фокус) | W (мышь) | S (стоп)",
                               bg=self.bg_color, fg="#aaaaaa", font=("Arial", 9))
         hint_label.pack(pady=5)
-
 
 if __name__ == "__main__":
     root = tk.Tk()

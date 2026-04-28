@@ -10,7 +10,7 @@ class ScreenReaderApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Экранный диктор для слабовидящих")
-        self.root.geometry("700x630")
+        self.root.geometry("700x680")
         self.root.minsize(600, 500)
 
         self.bg_color = "#1e1e1e"
@@ -20,6 +20,7 @@ class ScreenReaderApp:
         self.entry_bg = "#2d2d2d"
         self.root.configure(bg=self.bg_color)
 
+        # Инициализация SAPI5
         self.voice = win32com.client.Dispatch("SAPI.SpVoice")
         self.voices = self.voice.GetVoices()
         self.current_voice_index = 0
@@ -36,18 +37,22 @@ class ScreenReaderApp:
         self.log("Диктор запущен (SAPI5). Горячие клавиши активны.\n"
                  "Ctrl+Shift+R – читать страницу\n"
                  "Ctrl+Shift+F – элемент в фокусе\n"
-                 "Ctrl+Shift+W – элемент под мышью\n"
+                 "Ctrl+Shift+W / X – читать под курсором\n"
                  "Ctrl+Shift+S – остановить чтение")
 
+    # ---------------------- Горячие клавиши ----------------------
     def setup_hotkeys(self):
         try:
             keyboard.add_hotkey('ctrl+shift+r', self.read_browser_content)
             keyboard.add_hotkey('ctrl+shift+f', self.read_focused_element)
             keyboard.add_hotkey('ctrl+shift+w', self.read_element_under_cursor)
+            keyboard.add_hotkey('ctrl+shift+x', self.read_element_under_cursor)  # удобно
+            keyboard.add_hotkey('x', self.read_element_under_cursor)             # одиночная X
             keyboard.add_hotkey('ctrl+shift+s', self.stop_reading)
         except Exception as e:
             messagebox.showwarning("Предупреждение", f"Не удалось установить глобальные горячие клавиши.\nВозможно, нужны права администратора.\nОшибка: {e}")
 
+    # ---------------------- Речь ----------------------
     def speak(self, text, log_it=True):
         if not text or not text.strip():
             return
@@ -65,19 +70,57 @@ class ScreenReaderApp:
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.log_text.see(tk.END)
 
-    # ---------- Работа с браузером (UIAutomation) ----------
+    # ---------------------- Вспомогательная: рекурсивное извлечение текста ----------------------
+    def extract_text_from_element(self, elem, max_depth=3, current_depth=0):
+        """Рекурсивно собирает текст из элемента и всех его потомков."""
+        if not elem or current_depth > max_depth:
+            return None
+        texts = []
+        # Пытаемся взять Name
+        if elem.Name and elem.Name.strip():
+            texts.append(elem.Name.strip())
+        # Пытаемся взять Value через паттерн
+        try:
+            val_pattern = elem.GetPattern(auto.ValuePattern)
+            if val_pattern and val_pattern.CurrentValue:
+                texts.append(val_pattern.CurrentValue.strip())
+        except:
+            pass
+        # Для текстовых элементов (например, параграфы в браузере)
+        if elem.ControlTypeName == 'TextControl' and elem.Name:
+            texts.append(elem.Name.strip())
+        # Обходим детей
+        for child in elem.GetChildren():
+            child_text = self.extract_text_from_element(child, max_depth, current_depth+1)
+            if child_text:
+                texts.append(child_text)
+        # Убираем дубликаты и пустые строки
+        unique = []
+        for t in texts:
+            if t and t not in unique:
+                unique.append(t)
+        return " ".join(unique) if unique else None
+
+    # ---------------------- Поиск браузера (с поддержкой Яндекс) ----------------------
     def get_browser_window(self):
-        browser_classes = ['Chrome_WidgetWin_1', 'MozillaWindowClass', 'ApplicationFrameWindow']
+        browser_classes = [
+            'Chrome_WidgetWin_1',      # Chrome, Edge, Яндекс (обычно)
+            'MozillaWindowClass',      # Firefox
+            'ApplicationFrameWindow',  # Edge (старый)
+            'YandexBrowserWidgetWin'   # Яндекс (на случай отличия)
+        ]
         for class_name in browser_classes:
             win = auto.Control(ClassName=class_name, Name='.*', depth=1)
             if win.Exists(3, 0.5):
                 return win
+        # Если не нашли по классу, ищем по заголовку окна
         for win in auto.GetRootControl().GetChildren():
-            title = win.Name
-            if title and any(b in title.lower() for b in ['chrome', 'firefox', 'edge', 'mozilla', 'браузер']):
+            title = win.Name.lower() if win.Name else ""
+            if any(b in title for b in ['chrome', 'firefox', 'edge', 'mozilla', 'yandex', 'браузер']):
                 return win
         return None
 
+    # ---------------------- Адресная строка ----------------------
     def get_browser_address(self):
         browser = self.get_browser_window()
         if not browser:
@@ -106,6 +149,7 @@ class ScreenReaderApp:
                 return address_edit.Name
         return None
 
+    # ---------------------- Сбор всего текста страницы ----------------------
     def get_all_text_from_window(self, control):
         texts = []
         if not control:
@@ -119,6 +163,7 @@ class ScreenReaderApp:
             for child in ctrl.GetChildren():
                 walk(child)
         walk(control)
+        # Убираем последовательные дубликаты
         unique = []
         prev = ""
         for t in texts:
@@ -127,10 +172,11 @@ class ScreenReaderApp:
             prev = t
         return unique
 
+    # ---------------------- Функции чтения ----------------------
     def read_browser_content(self):
         browser = self.get_browser_window()
         if not browser:
-            self.speak("Браузер не найден. Откройте Chrome, Firefox или Edge.")
+            self.speak("Браузер не найден. Откройте Chrome, Firefox, Edge или Яндекс Браузер.")
             return
         time.sleep(0.2)
         texts = self.get_all_text_from_window(browser)
@@ -144,49 +190,41 @@ class ScreenReaderApp:
 
     def read_focused_element(self):
         focused = auto.GetFocusedControl()
-        if focused:
-            text = focused.Name
-            if not text:
-                try:
-                    value_pattern = focused.GetPattern(auto.ValuePattern)
-                    if value_pattern:
-                        text = value_pattern.CurrentValue
-                except:
-                    pass
-            if text and text.strip():
-                self.speak(text)
-            else:
-                self.speak("Элемент не содержит текста")
-        else:
+        if not focused:
             self.speak("Нет элемента в фокусе")
+            return
+        text = self.extract_text_from_element(focused, max_depth=2)
+        if text:
+            if len(text) > 500:
+                text = text[:500] + "..."
+            self.speak(text)
+        else:
+            type_name = focused.ControlTypeName or "элемент"
+            self.speak(f"{type_name} в фокусе (нет текста)")
 
     def read_element_under_cursor(self):
         x, y = auto.GetCursorPos()
         elem = auto.ControlFromPoint(x, y)
-        if elem:
-            text = elem.Name
-            if not text:
-                try:
-                    value_pattern = elem.GetPattern(auto.ValuePattern)
-                    if value_pattern:
-                        text = value_pattern.CurrentValue
-                except:
-                    pass
-            if text and text.strip():
-                self.speak(text)
-            else:
-                self.speak("Под курсором нет текста")
+        if not elem:
+            self.speak("Ничего не найдено под курсором")
+            return
+        text = self.extract_text_from_element(elem, max_depth=2)
+        if text:
+            if len(text) > 500:
+                text = text[:500] + "..."
+            self.speak(text)
         else:
-            self.speak("Не удалось определить элемент под курсором")
+            type_name = elem.ControlTypeName or "элемент"
+            self.speak(f"{type_name} (не содержит текста)")
 
     def read_current_url(self):
         url = self.get_browser_address()
         if url:
             self.speak(f"Адрес текущей страницы: {url}")
         else:
-            self.speak("Не удалось получить адресную строку. Убедитесь, что открыт Chrome или Edge.")
+            self.speak("Не удалось получить адресную строку. Убедитесь, что открыт браузер.")
 
-    # ---------- Настройки речи ----------
+    # ---------------------- Интерфейс и настройки ----------------------
     def update_voices_list(self):
         voice_names = [v.GetDescription() for v in self.voices]
         self.voice_combo['values'] = voice_names
@@ -227,18 +265,19 @@ class ScreenReaderApp:
         except Exception as e:
             self.log(f"Ошибка открытия браузера: {e}")
 
-    # ---------- GUI ----------
+    # ---------------------- GUI ----------------------
     def create_widgets(self):
         main_frame = tk.Frame(self.root, bg=self.bg_color)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
 
         title_label = tk.Label(main_frame, text="Экранный диктор для слабовидящих",
                                font=("Arial", 18, "bold"), bg=self.bg_color, fg=self.fg_color)
-        title_label.pack(pady=(0,15))
+        title_label.pack(pady=(0,10))
 
+        # Адресная строка
         url_frame = tk.LabelFrame(main_frame, text="Адресная строка", font=("Arial", 12),
                                   bg=self.bg_color, fg=self.fg_color, bd=2, relief=tk.GROOVE)
-        url_frame.pack(fill=tk.X, pady=10)
+        url_frame.pack(fill=tk.X, pady=5)
         self.url_entry = tk.Entry(url_frame, font=("Arial", 12), bg=self.entry_bg, fg=self.fg_color,
                                   insertbackground='white')
         self.url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10,5), pady=10)
@@ -251,9 +290,10 @@ class ScreenReaderApp:
                                  activebackground=self.button_active_bg)
         read_url_btn.pack(side=tk.RIGHT, padx=5, pady=10)
 
+        # Управление чтением
         control_frame = tk.LabelFrame(main_frame, text="Управление чтением", font=("Arial", 12),
                                       bg=self.bg_color, fg=self.fg_color, bd=2, relief=tk.GROOVE)
-        control_frame.pack(fill=tk.X, pady=10)
+        control_frame.pack(fill=tk.X, pady=5)
 
         btn_style = {"bg": self.button_bg, "fg": self.fg_color, "font": ("Arial", 11),
                      "activebackground": self.button_active_bg, "padx": 10, "pady": 5}
@@ -269,9 +309,10 @@ class ScreenReaderApp:
                   bg="#a13e3e", fg="white", font=("Arial", 11, "bold"),
                   activebackground="#8b2c2c", padx=10, pady=5).pack(side=tk.LEFT, padx=5)
 
+        # Настройки речи
         settings_frame = tk.LabelFrame(main_frame, text="Настройки речи", font=("Arial", 12),
                                        bg=self.bg_color, fg=self.fg_color, bd=2, relief=tk.GROOVE)
-        settings_frame.pack(fill=tk.X, pady=10)
+        settings_frame.pack(fill=tk.X, pady=5)
 
         speed_frame = tk.Frame(settings_frame, bg=self.bg_color)
         speed_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -300,17 +341,19 @@ class ScreenReaderApp:
         self.voice_combo.pack(side=tk.LEFT, padx=10)
         self.voice_combo.bind("<<ComboboxSelected>>", self.change_voice)
 
+        # Лог
         log_frame = tk.LabelFrame(main_frame, text="Лог произнесённого", font=("Arial", 12),
                                   bg=self.bg_color, fg=self.fg_color, bd=2, relief=tk.GROOVE)
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         self.log_text = tk.Text(log_frame, bg=self.entry_bg, fg=self.fg_color, font=("Consolas", 10),
-                                wrap=tk.WORD, height=10)
+                                wrap=tk.WORD, height=8)
         scrollbar = tk.Scrollbar(log_frame, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        hint_label = tk.Label(main_frame, text="Горячие клавиши: Ctrl+Shift+R (страница) | F (фокус) | W (мышь) | S (стоп)",
+        # Подсказка
+        hint_label = tk.Label(main_frame, text="Горячие клавиши: Ctrl+Shift+R (страница) | F (фокус) | W/X (под курсором) | S (стоп)",
                               bg=self.bg_color, fg="#aaaaaa", font=("Arial", 9))
         hint_label.pack(pady=5)
 

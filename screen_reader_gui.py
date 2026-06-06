@@ -7,43 +7,209 @@ import keyboard
 import win32com.client
 import re
 import traceback
+from collections import deque
+
 
 class ScreenReaderApp:
+    """
+    Экранный диктор для чтения веб-страниц.
+
+    Главное отличие этой версии:
+    кнопка «Читать содержимое страницы» сначала ищет DocumentControl / web-view
+    внутри окна браузера и читает только эту область, а не всё окно браузера
+    вместе с вкладками, адресной строкой и панелью кнопок.
+    """
+
+    MAX_READ_CHARS = 8000
+    MAX_TREE_NODES = 2500
+
+    CONTENT_CONTROL_TYPES = {
+        "TextControl",
+        "HyperlinkControl",
+        "ButtonControl",
+        "ListItemControl",
+        "DataItemControl",
+        "EditControl",
+        "HeaderControl",
+        "DocumentControl",
+        "ImageControl",
+    }
+
+    PAGE_ROOT_CONTROL_TYPES = {
+        "DocumentControl",
+        "PaneControl",
+        "CustomControl",
+        "GroupControl",
+    }
+
+    BROWSER_UI_WORDS = (
+        "address and search bar",
+        "address bar",
+        "omnibox",
+        "search or enter web address",
+        "tab search",
+        "bookmarks bar",
+        "toolbar",
+        "browser toolbar",
+        "navigation",
+        "downloads",
+        "extensions",
+        "profile",
+        "new tab",
+        "reload",
+        "refresh",
+        "back",
+        "forward",
+        "адресная строка",
+        "строка адреса",
+        "панель инструментов",
+        "закладки",
+        "новая вкладка",
+        "обновить",
+        "назад",
+        "вперёд",
+        "вперед",
+    )
+
+    BROWSER_CLASSES = [
+        "Chrome_WidgetWin_1",        
+        "MozillaWindowClass",        
+        "ApplicationFrameWindow",    
+        "YandexBrowserWidgetWin",
+    ]
+
     def __init__(self, root):
         self.root = root
-        self.root.title("Экранный диктор для слабовидящих")
-        self.root.geometry("700x680")
-        self.root.minsize(600, 500)
+        self.root.title("Диктор веб-страниц")
+        self.root.geometry("860x760")
+        self.root.minsize(760, 620)
 
-        self.bg_color = "#1e1e1e"
-        self.fg_color = "#f0f0f0"
-        self.button_bg = "#3c3f41"
-        self.button_active_bg = "#5a5e62"
-        self.entry_bg = "#2d2d2d"
-        self.root.configure(bg=self.bg_color)
+        self.colors = {
+            "bg": "#0f172a",
+            "panel": "#111827",
+            "panel_2": "#1f2937",
+            "text": "#f8fafc",
+            "muted": "#cbd5e1",
+            "accent": "#38bdf8",
+            "accent_dark": "#0284c7",
+            "danger": "#dc2626",
+            "danger_dark": "#991b1b",
+            "entry": "#020617",
+            "border": "#334155",
+        }
 
-        # Инициализация SAPI5
+        self.root.configure(bg=self.colors["bg"])
+
         self.voice = win32com.client.Dispatch("SAPI.SpVoice")
         self.voices = self.voice.GetVoices()
         self.current_voice_index = 0
         self.rate = 0
         self.volume = 100
 
-        self.setup_hotkeys()
+        self.setup_style()
         self.create_widgets()
-
         self.update_voices_list()
         self.speed_scale.set(0)
         self.volume_scale.set(100)
+        self.setup_hotkeys()
 
-        self.log("Диктор запущен. Горячие клавиши активны.\n"
-                 "Ctrl+Shift+R – читать страницу\n"
-                 "Ctrl+Shift+F – элемент в фокусе\n"
-                 "X или Ctrl+Shift+W – читать под курсором\n"
-                 "Ctrl+Shift+S – остановить чтение\n"
-                 "Ctrl+Shift+A – прочитать адресную строку")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.log(
+            "Диктор запущен. Горячие клавиши активны.\n"
+            "q — читать содержимое страницы\n"
+            "o — читать элемент в фокусе\n"
+            "Ctrl+Shift+X или X — читать элемент под курсором\n"
+            "S — остановить чтение\n"
+            "A — прочитать адрес / заголовок страницы"
+        )
+
+    # ---------------------- Оформление ----------------------
+
+    def setup_style(self):
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure(
+            "TCombobox",
+            fieldbackground=self.colors["entry"],
+            background=self.colors["panel_2"],
+            foreground=self.colors["text"],
+            arrowcolor=self.colors["text"],
+            bordercolor=self.colors["border"],
+            lightcolor=self.colors["border"],
+            darkcolor=self.colors["border"],
+            padding=6,
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", self.colors["entry"])],
+            foreground=[("readonly", self.colors["text"])],
+        )
+
+    def create_card(self, parent, title):
+        outer = tk.Frame(
+            parent,
+            bg=self.colors["panel"],
+            highlightbackground=self.colors["border"],
+            highlightthickness=1,
+            bd=0,
+        )
+        outer.pack(fill=tk.X, pady=8)
+
+        header = tk.Label(
+            outer,
+            text=title,
+            bg=self.colors["panel"],
+            fg=self.colors["text"],
+            font=("Segoe UI", 13, "bold"),
+            anchor="w",
+        )
+        header.pack(fill=tk.X, padx=16, pady=(14, 6))
+
+        body = tk.Frame(outer, bg=self.colors["panel"])
+        body.pack(fill=tk.X, padx=16, pady=(0, 16))
+        return body
+
+    def make_button(self, parent, text, command, variant="primary"):
+        if variant == "danger":
+            bg = self.colors["danger"]
+            active = self.colors["danger_dark"]
+            fg = "white"
+        elif variant == "secondary":
+            bg = self.colors["panel_2"]
+            active = self.colors["border"]
+            fg = self.colors["text"]
+        else:
+            bg = self.colors["accent_dark"]
+            active = self.colors["accent"]
+            fg = "white"
+
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=bg,
+            fg=fg,
+            activebackground=active,
+            activeforeground="white",
+            font=("Segoe UI", 11, "bold"),
+            relief=tk.FLAT,
+            bd=0,
+            padx=16,
+            pady=10,
+            cursor="hand2",
+            takefocus=True,
+            highlightthickness=2,
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["accent"],
+        )
 
     # ---------------------- Горячие клавиши ----------------------
+
     def setup_hotkeys(self):
         def safe_handler(handler):
             def wrapper():
@@ -52,37 +218,47 @@ class ScreenReaderApp:
                 except Exception as e:
                     self.log(f"Ошибка: {str(e)}")
                     print(traceback.format_exc())
-                    self.speak("Произошла ошибка, смотрите лог", log_it=False)
+                    self.speak("Произошла ошибка. Подробности записаны в лог.", log_it=False)
             return wrapper
 
         try:
-            keyboard.add_hotkey('ctrl+shift+r', safe_handler(self.read_browser_content))
-            keyboard.add_hotkey('ctrl+shift+f', safe_handler(self.read_focused_element))
-            keyboard.add_hotkey('ctrl+shift+w', safe_handler(self.read_element_under_cursor))
-            keyboard.add_hotkey('ctrl+shift+x', safe_handler(self.read_element_under_cursor))
-            keyboard.add_hotkey('x', safe_handler(self.read_element_under_cursor))
-            keyboard.add_hotkey('ctrl+shift+s', safe_handler(self.stop_reading))
-            keyboard.add_hotkey('ctrl+shift+a', safe_handler(self.read_current_url))
+            keyboard.add_hotkey("q", safe_handler(self.read_browser_content))
+            keyboard.add_hotkey("o", safe_handler(self.read_focused_element))
+            keyboard.add_hotkey("k", safe_handler(self.read_element_under_cursor))
+            keyboard.add_hotkey("ctrl+shift+x", safe_handler(self.read_element_under_cursor))
+            keyboard.add_hotkey("x", safe_handler(self.read_element_under_cursor))
+            keyboard.add_hotkey("s", safe_handler(self.stop_reading))
+            keyboard.add_hotkey("a", safe_handler(self.read_current_url))
         except Exception as e:
-            messagebox.showwarning("Предупреждение", f"Не удалось установить горячие клавиши.\nЗапустите от имени администратора.\nОшибка: {e}")
+            messagebox.showwarning(
+                "Предупреждение",
+                "Не удалось установить горячие клавиши.\n"
+                "Попробуйте запустить программу от имени администратора.\n\n"
+                f"Ошибка: {e}",
+            )
 
     # ---------------------- Речь ----------------------
+
     def speak(self, text, log_it=True):
-        if not text or not text.strip():
+        text = self.clean_text(text)
+        if not text:
             return
+
         if log_it:
-            self.log(f"Диктор: {text}")
+            preview = text if len(text) <= 700 else text[:700] + "..."
+            self.log(f"Диктор: {preview}")
+
         try:
-            self.voice.Speak("", 3)
-            self.voice.Speak(text, 1)
-        except:
+            self.voice.Speak("", 3)   # очистить очередь
+            self.voice.Speak(text, 1) # асинхронно произнести
+        except Exception:
             pass
 
     def stop_reading(self):
         try:
             self.voice.Speak("", 3)
             self.log("Чтение остановлено")
-        except:
+        except Exception:
             pass
 
     def log(self, message):
@@ -91,16 +267,17 @@ class ScreenReaderApp:
         self.log_text.see(tk.END)
 
     # ---------------------- Безопасное извлечение свойств ----------------------
+
     def safe_get_name(self, elem):
         try:
             return elem.Name or ""
-        except:
+        except Exception:
             return ""
 
     def safe_get_control_type(self, elem):
         try:
             return elem.ControlTypeName or ""
-        except:
+        except Exception:
             return ""
 
     def safe_get_value(self, elem):
@@ -108,198 +285,363 @@ class ScreenReaderApp:
             val_pattern = elem.GetPattern(auto.ValuePattern)
             if val_pattern:
                 return val_pattern.CurrentValue or ""
-        except:
+        except Exception:
             pass
         return ""
 
-    def extract_text_from_element(self, elem, max_depth=3, current_depth=0):
-        if not elem or current_depth > max_depth:
-            return None
-        texts = []
-        name = self.safe_get_name(elem)
-        if name:
-            texts.append(name)
-        value = self.safe_get_value(elem)
-        if value:
-            texts.append(value)
-        if self.safe_get_control_type(elem) == 'TextControl' and name:
-            texts.append(name)
+    def safe_get_rect(self, elem):
         try:
-            children = elem.GetChildren()
-        except:
-            children = []
-        for child in children:
-            child_text = self.extract_text_from_element(child, max_depth, current_depth+1)
-            if child_text:
-                texts.append(child_text)
-        unique = []
-        for t in texts:
-            if t and t not in unique:
-                unique.append(t)
-        return " ".join(unique) if unique else None
+            rect = elem.BoundingRectangle
+            left = int(getattr(rect, "left", getattr(rect, "Left", 0)))
+            top = int(getattr(rect, "top", getattr(rect, "Top", 0)))
+            right = int(getattr(rect, "right", getattr(rect, "Right", 0)))
+            bottom = int(getattr(rect, "bottom", getattr(rect, "Bottom", 0)))
+            return left, top, right, bottom
+        except Exception:
+            return None
 
-    # ---------------------- Поиск браузера ----------------------
+    def rect_size(self, rect):
+        if not rect:
+            return 0, 0
+        left, top, right, bottom = rect
+        return max(0, right - left), max(0, bottom - top)
+
+    def clean_text(self, text):
+        if not text:
+            return ""
+        text = str(text)
+        text = re.sub(r"\s+", " ", text)
+        text = text.replace("\u200b", "")
+        return text.strip()
+
+    def is_probably_browser_ui_text(self, text):
+        text = self.clean_text(text)
+        if not text:
+            return True
+
+        lower = text.lower()
+
+        # Слишком короткие технические фрагменты часто являются кнопками панели браузера.
+        if lower in {"x", "×", "+", "-", "—", "…", "⋮"}:
+            return True
+
+        return any(word in lower for word in self.BROWSER_UI_WORDS)
+
+    # ---------------------- Поиск браузера и страницы ----------------------
+
     def get_browser_window(self):
-        browser_classes = [
-            'Chrome_WidgetWin_1',
-            'MozillaWindowClass',
-            'ApplicationFrameWindow',
-            'YandexBrowserWidgetWin'
-        ]
-        for class_name in browser_classes:
+        for class_name in self.BROWSER_CLASSES:
             try:
-                win = auto.Control(ClassName=class_name, Name='.*', depth=1)
+                win = auto.Control(ClassName=class_name, Name=".*", depth=1)
                 if win.Exists(1, 0.3):
                     return win
-            except:
+            except Exception:
                 continue
+
         try:
             for win in auto.GetRootControl().GetChildren():
                 try:
-                    title = win.Name.lower() if win.Name else ""
-                    if any(b in title for b in ['chrome', 'firefox', 'edge', 'mozilla', 'yandex', 'браузер']):
+                    title = self.safe_get_name(win).lower()
+                    class_name = getattr(win, "ClassName", "") or ""
+                    if any(b in title for b in ["chrome", "firefox", "edge", "mozilla", "yandex", "браузер"]):
                         return win
-                except:
+                    if class_name in self.BROWSER_CLASSES:
+                        return win
+                except Exception:
                     continue
-        except:
+        except Exception:
             pass
+
         return None
 
-    # ---------------------- АДРЕСНАЯ СТРОКА (работает через заголовок окна) ----------------------
+    def iter_controls(self, root_control, max_depth=10):
+        queue = deque([(root_control, 0)])
+        visited = 0
+
+        while queue and visited < self.MAX_TREE_NODES:
+            ctrl, depth = queue.popleft()
+            visited += 1
+            yield ctrl, depth
+
+            if depth >= max_depth:
+                continue
+
+            try:
+                children = ctrl.GetChildren()
+            except Exception:
+                children = []
+
+            for child in children:
+                queue.append((child, depth + 1))
+
+    def get_page_content_root(self, browser):
+        """
+        Возвращает корневой элемент области веб-страницы.
+
+        Логика:
+        1. Сначала ищем DocumentControl — это обычно DOM/страница.
+        2. Если DocumentControl не найден, ищем крупную Pane/Custom/Group-область
+           ниже панели браузера.
+        3. Окно браузера целиком не читаем, чтобы не захватывать вкладки,
+           адресную строку и кнопки браузера.
+        """
+        browser_rect = self.safe_get_rect(browser)
+        browser_width, browser_height = self.rect_size(browser_rect)
+
+        document_candidates = []
+        fallback_candidates = []
+
+        for ctrl, depth in self.iter_controls(browser, max_depth=9):
+            control_type = self.safe_get_control_type(ctrl)
+            if control_type not in self.PAGE_ROOT_CONTROL_TYPES:
+                continue
+
+            name = self.safe_get_name(ctrl)
+            if name and self.is_probably_browser_ui_text(name):
+                continue
+
+            rect = self.safe_get_rect(ctrl)
+            width, height = self.rect_size(rect)
+
+            if width < 300 or height < 220:
+                continue
+
+            # Если есть координаты браузера, стараемся не брать верхнюю панель.
+            if browser_rect and rect:
+                _, browser_top, _, _ = browser_rect
+                _, top, _, _ = rect
+                if top < browser_top + 45 and control_type != "DocumentControl":
+                    continue
+
+            area = width * height
+            score = area - depth * 25000
+
+            if control_type == "DocumentControl":
+                score += 1_000_000
+                document_candidates.append((score, ctrl, control_type, name, rect))
+            else:
+                # Fallback: берем только достаточно крупную область, похожую на web-view.
+                if browser_width and browser_height:
+                    if width < browser_width * 0.45 or height < browser_height * 0.35:
+                        continue
+                fallback_candidates.append((score, ctrl, control_type, name, rect))
+
+        candidates = document_candidates or fallback_candidates
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        best = candidates[0]
+        _, ctrl, control_type, name, rect = best
+        self.log(f"Найдена область страницы: {control_type}; {name or 'без названия'}; rect={rect}")
+        return ctrl
+
+    # ---------------------- АДРЕС / ЗАГОЛОВОК ----------------------
+
     def get_browser_address(self):
         """
-        Читает адрес из заголовка окна браузера.
-        Это работает ВСЕГДА во всех браузерах!
+        В этой версии адрес берётся из заголовка окна, если браузер отдаёт его через UIA.
+        Для чтения самой страницы эта функция не используется.
         """
         browser = self.get_browser_window()
         if not browser:
             return None
-        
+
         try:
             title = self.safe_get_name(browser)
-            self.log(f"Заголовок окна: {title}")  # для отладки
-            
             if not title:
                 return None
-            
-            # Способ 1: ищем прямой URL в заголовке
-            url_match = re.search(r'https?://[^\s]+', title)
+
+            url_match = re.search(r"https?://[^\s]+", title)
             if url_match:
-                return url_match.group(1)
-            
-            # Способ 2: ищем www.домен
-            www_match = re.search(r'www\.[^\s]+', title)
+                return url_match.group(0)
+
+            www_match = re.search(r"www\.[^\s]+", title)
             if www_match:
-                return f"https://{www_match.group(1)}"
-            
-            # Способ 3: ищем любой домен (site.com, site.ru и т.д.)
-            domain_match = re.search(r'([a-zA-Z0-9-]+\.[a-zA-Z]{2,})(?:/|$|\s)', title)
+                return f"https://{www_match.group(0)}"
+
+            domain_match = re.search(r"([a-zA-Z0-9-]+\.[a-zA-Z]{2,})(?:/|$|\s)", title)
             if domain_match:
                 return f"https://{domain_match.group(1)}"
-            
-            # Способ 4: берём всё до разделителя (часто там название сайта)
-            for separator in [' - ', ' – ', ' | ', ' — ']:
-                if separator in title:
-                    return title.split(separator)[0].strip()
-            
-            # Если ничего не нашли, возвращаем заголовок целиком
-            return title
-            
+
+            return title.strip()
         except Exception as e:
-            self.log(f"Ошибка чтения адреса: {e}")
+            self.log(f"Ошибка чтения адреса / заголовка: {e}")
             return None
 
-    # ---------------------- Сбор текста страницы ----------------------
-    def get_all_text_from_window(self, control):
+    # ---------------------- Сбор текста ----------------------
+
+    def extract_text_from_element(self, elem, max_depth=3, current_depth=0):
+        if not elem or current_depth > max_depth:
+            return None
+
         texts = []
-        if not control:
-            return texts
-        def walk(ctrl):
-            try:
-                type_name = self.safe_get_control_type(ctrl)
-                if type_name in ['TextControl', 'EditControl', 'DocumentControl',
-                                 'ButtonControl', 'HyperlinkControl', 'ListItemControl']:
-                    text = self.safe_get_name(ctrl)
-                    if text and text.strip():
-                        texts.append(text.strip())
-                for child in ctrl.GetChildren():
-                    walk(child)
-            except:
-                pass
-        walk(control)
-        unique = []
-        prev = ""
-        for t in texts:
-            if t != prev:
-                unique.append(t)
-            prev = t
-        return unique
+        control_type = self.safe_get_control_type(elem)
+
+        name = self.clean_text(self.safe_get_name(elem))
+        if name and not self.is_probably_browser_ui_text(name):
+            texts.append(name)
+
+        value = self.clean_text(self.safe_get_value(elem))
+        if value and value != name and not self.is_probably_browser_ui_text(value):
+            texts.append(value)
+
+        try:
+            children = elem.GetChildren()
+        except Exception:
+            children = []
+
+        for child in children:
+            child_text = self.extract_text_from_element(child, max_depth, current_depth + 1)
+            if child_text:
+                texts.append(child_text)
+
+        return self.merge_text_fragments(texts) if texts else None
+
+    def merge_text_fragments(self, texts):
+        result = []
+        seen = set()
+
+        for text in texts:
+            text = self.clean_text(text)
+            if not text:
+                continue
+
+            normalized = text.lower()
+            if normalized in seen:
+                continue
+
+            # Убираем повтор, когда новый фрагмент почти полностью совпадает с предыдущим.
+            if result:
+                prev = result[-1]
+                if text == prev or text in prev:
+                    continue
+
+            seen.add(normalized)
+            result.append(text)
+
+        return " ".join(result)
+
+    def get_text_from_page_root(self, page_root):
+        texts = []
+
+        for ctrl, depth in self.iter_controls(page_root, max_depth=14):
+            control_type = self.safe_get_control_type(ctrl)
+
+            if control_type not in self.CONTENT_CONTROL_TYPES:
+                continue
+
+            # У контейнеров имя часто совпадает с заголовком страницы, а не с текстом.
+            # Поэтому для DocumentControl берём имя только на первом уровне.
+            if control_type == "DocumentControl" and depth > 0:
+                continue
+
+            name = self.clean_text(self.safe_get_name(ctrl))
+            value = self.clean_text(self.safe_get_value(ctrl))
+
+            for fragment in (name, value):
+                if not fragment:
+                    continue
+                if self.is_probably_browser_ui_text(fragment):
+                    continue
+
+                # Слишком длинные технические склейки UIA часто являются контейнерами.
+                # Реальный абзац оставляем, но гигантские агрегаты пропускаем.
+                if len(fragment) > 1200 and control_type not in {"TextControl", "EditControl"}:
+                    continue
+
+                texts.append(fragment)
+
+        return self.merge_text_fragments(texts)
 
     # ---------------------- Функции чтения ----------------------
+
     def read_browser_content(self):
         browser = self.get_browser_window()
         if not browser:
             self.speak("Браузер не найден. Откройте Chrome, Firefox, Edge или Яндекс Браузер.")
             return
+
         time.sleep(0.2)
-        texts = self.get_all_text_from_window(browser)
-        if not texts:
-            self.speak("Не удалось найти текст на странице.")
+
+        page_root = self.get_page_content_root(browser)
+        if not page_root:
+            self.speak(
+                "Не удалось отделить содержимое страницы от интерфейса браузера. "
+                "Откройте страницу, дождитесь загрузки и нажмите на область сайта."
+            )
             return
-        full_text = ". ".join(texts)
-        if len(full_text) > 3000:
-            full_text = full_text[:3000] + "..."
+
+        full_text = self.get_text_from_page_root(page_root)
+
+        if not full_text:
+            self.speak(
+                "Текст на странице не найден. Возможно, сайт скрывает текст от системной доступности "
+                "или страница ещё не загрузилась."
+            )
+            return
+
+        if len(full_text) > self.MAX_READ_CHARS:
+            full_text = (
+                full_text[: self.MAX_READ_CHARS]
+                + ". Текст страницы длинный, поэтому прочитана первая часть."
+            )
+
         self.speak(full_text)
 
     def read_focused_element(self):
         try:
             focused = auto.GetFocusedControl()
-        except:
-            self.speak("Ошибка получения фокуса")
+        except Exception:
+            self.speak("Ошибка получения фокуса.")
             return
+
         if not focused:
-            self.speak("Нет элемента в фокусе")
+            self.speak("Нет элемента в фокусе.")
             return
+
         text = self.extract_text_from_element(focused, max_depth=2)
         if text:
-            if len(text) > 500:
-                text = text[:500] + "..."
+            if len(text) > 700:
+                text = text[:700] + ". Текст элемента длинный, прочитана первая часть."
             self.speak(text)
         else:
             type_name = self.safe_get_control_type(focused) or "элемент"
-            self.speak(f"{type_name} в фокусе (нет текста)")
+            self.speak(f"{type_name} в фокусе. Текста нет.")
 
     def read_element_under_cursor(self):
         try:
             x, y = auto.GetCursorPos()
             elem = auto.ControlFromPoint(x, y)
-        except:
-            self.speak("Ошибка получения элемента под курсором")
+        except Exception:
+            self.speak("Ошибка получения элемента под курсором.")
             return
+
         if not elem:
-            self.speak("Ничего не найдено под курсором")
+            self.speak("Ничего не найдено под курсором.")
             return
+
         text = self.extract_text_from_element(elem, max_depth=2)
         if text:
-            if len(text) > 500:
-                text = text[:500] + "..."
+            if len(text) > 700:
+                text = text[:700] + ". Текст элемента длинный, прочитана первая часть."
             self.speak(text)
         else:
             type_name = self.safe_get_control_type(elem) or "элемент"
-            self.speak(f"{type_name} (не содержит текста)")
+            self.speak(f"{type_name}. Текста нет.")
 
     def read_current_url(self):
-        """Читает адрес текущей страницы"""
         url = self.get_browser_address()
         if url:
-            self.speak(f"Адрес текущей страницы: {url}")
+            self.speak(f"Текущий адрес или заголовок страницы: {url}")
         else:
-            self.speak("Не удалось определить адрес страницы. Убедитесь, что открыт браузер.")
+            self.speak("Не удалось определить адрес или заголовок страницы. Убедитесь, что открыт браузер.")
 
-    # ---------------------- Интерфейс и настройки ----------------------
+    # ---------------------- Настройки речи ----------------------
+
     def update_voices_list(self):
         voice_names = [v.GetDescription() for v in self.voices]
-        self.voice_combo['values'] = voice_names
+        self.voice_combo["values"] = voice_names
         if voice_names:
             self.voice_combo.current(0)
             self.current_voice_index = 0
@@ -317,117 +659,278 @@ class ScreenReaderApp:
     def change_speed(self, val):
         self.rate = int(float(val))
         self.voice.Rate = self.rate
-        self.speed_label.config(text=f"Скорость: {self.rate}")
+        self.speed_value_label.config(text=str(self.rate))
 
     def change_volume(self, val):
         self.volume = int(float(val))
         self.voice.Volume = self.volume
-        self.volume_label.config(text=f"Громкость: {self.volume}%")
+        self.volume_value_label.config(text=f"{self.volume}%")
 
     def open_url(self):
         url = self.url_entry.get().strip()
         if not url:
-            self.log("Введите адрес")
+            self.log("Введите адрес сайта.")
             return
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
+
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+
         try:
             webbrowser.open(url)
             self.log(f"Открыт адрес: {url}")
         except Exception as e:
-            self.log(f"Ошибка: {e}")
+            self.log(f"Ошибка открытия адреса: {e}")
 
     # ---------------------- GUI ----------------------
+
     def create_widgets(self):
-        main_frame = tk.Frame(self.root, bg=self.bg_color)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        main_frame = tk.Frame(self.root, bg=self.colors["bg"])
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=22, pady=18)
 
-        title_label = tk.Label(main_frame, text="Экранный диктор для слабовидящих",
-                               font=("Arial", 18, "bold"), bg=self.bg_color, fg=self.fg_color)
-        title_label.pack(pady=(0,10))
+        title = tk.Label(
+            main_frame,
+            text="Диктор веб-страниц",
+            font=("Segoe UI", 24, "bold"),
+            bg=self.colors["bg"],
+            fg=self.colors["text"],
+            anchor="w",
+        )
+        title.pack(fill=tk.X)
 
-        # Адресная строка
-        url_frame = tk.LabelFrame(main_frame, text="Адресная строка", font=("Arial", 12),
-                                  bg=self.bg_color, fg=self.fg_color, bd=2, relief=tk.GROOVE)
-        url_frame.pack(fill=tk.X, pady=5)
-        self.url_entry = tk.Entry(url_frame, font=("Arial", 12), bg=self.entry_bg, fg=self.fg_color,
-                                  insertbackground='white')
-        self.url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10,5), pady=10)
-        open_btn = tk.Button(url_frame, text="Открыть в браузере", command=self.open_url,
-                             bg=self.button_bg, fg=self.fg_color, font=("Arial", 10),
-                             activebackground=self.button_active_bg)
-        open_btn.pack(side=tk.RIGHT, padx=5, pady=10)
-        read_url_btn = tk.Button(url_frame, text="🔗 Прочитать адрес", command=self.read_current_url,
-                                 bg=self.button_bg, fg=self.fg_color, font=("Arial", 10),
-                                 activebackground=self.button_active_bg)
-        read_url_btn.pack(side=tk.RIGHT, padx=5, pady=10)
+        subtitle = tk.Label(
+            main_frame,
+            text="Высококонтрастный интерфейс. Чтение страницы без адресной строки и панели браузера.",
+            font=("Segoe UI", 11),
+            bg=self.colors["bg"],
+            fg=self.colors["muted"],
+            anchor="w",
+        )
+        subtitle.pack(fill=tk.X, pady=(2, 10))
+
+        # Адрес
+        url_card = self.create_card(main_frame, "Открыть сайт")
+        url_row = tk.Frame(url_card, bg=self.colors["panel"])
+        url_row.pack(fill=tk.X)
+
+        self.url_entry = tk.Entry(
+            url_row,
+            font=("Segoe UI", 13),
+            bg=self.colors["entry"],
+            fg=self.colors["text"],
+            insertbackground=self.colors["text"],
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["accent"],
+        )
+        self.url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=10, padx=(0, 10))
+
+        open_btn = self.make_button(url_row, "Открыть", self.open_url, "primary")
+        open_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        read_url_btn = self.make_button(url_row, "Прочитать адрес", self.read_current_url, "secondary")
+        read_url_btn.pack(side=tk.LEFT)
 
         # Управление чтением
-        control_frame = tk.LabelFrame(main_frame, text="Управление чтением", font=("Arial", 12),
-                                      bg=self.bg_color, fg=self.fg_color, bd=2, relief=tk.GROOVE)
-        control_frame.pack(fill=tk.X, pady=5)
+        control_card = self.create_card(main_frame, "Чтение")
+        top_buttons = tk.Frame(control_card, bg=self.colors["panel"])
+        top_buttons.pack(fill=tk.X)
 
-        btn_style = {"bg": self.button_bg, "fg": self.fg_color, "font": ("Arial", 11),
-                     "activebackground": self.button_active_bg, "padx": 10, "pady": 5}
-        btn_row1 = tk.Frame(control_frame, bg=self.bg_color)
-        btn_row1.pack(pady=5)
-        tk.Button(btn_row1, text="📖 Читать всю страницу", command=self.read_browser_content, **btn_style).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_row1, text="🎯 Читать фокус", command=self.read_focused_element, **btn_style).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_row1, text="🖱️ Читать под курсором (X)", command=self.read_element_under_cursor, **btn_style).pack(side=tk.LEFT, padx=5)
+        read_page_btn = self.make_button(
+            top_buttons,
+            "Читать содержимое страницы",
+            self.read_browser_content,
+            "primary",
+        )
+        read_page_btn.pack(side=tk.LEFT, padx=(0, 8), pady=(0, 8))
 
-        btn_row2 = tk.Frame(control_frame, bg=self.bg_color)
-        btn_row2.pack(pady=5)
-        tk.Button(btn_row2, text="⏹️ Остановить чтение", command=self.stop_reading,
-                  bg="#a13e3e", fg="white", font=("Arial", 11, "bold"),
-                  activebackground="#8b2c2c", padx=10, pady=5).pack(side=tk.LEFT, padx=5)
+        read_focus_btn = self.make_button(
+            top_buttons,
+            "Читать фокус",
+            self.read_focused_element,
+            "secondary",
+        )
+        read_focus_btn.pack(side=tk.LEFT, padx=(0, 8), pady=(0, 8))
+
+        read_cursor_btn = self.make_button(
+            top_buttons,
+            "Читать под курсором",
+            self.read_element_under_cursor,
+            "secondary",
+        )
+        read_cursor_btn.pack(side=tk.LEFT, padx=(0, 8), pady=(0, 8))
+
+        stop_btn = self.make_button(control_card, "Остановить чтение", self.stop_reading, "danger")
+        stop_btn.pack(anchor="w", pady=(4, 0))
 
         # Настройки речи
-        settings_frame = tk.LabelFrame(main_frame, text="Настройки речи", font=("Arial", 12),
-                                       bg=self.bg_color, fg=self.fg_color, bd=2, relief=tk.GROOVE)
-        settings_frame.pack(fill=tk.X, pady=5)
+        settings_card = self.create_card(main_frame, "Настройки голоса")
 
-        speed_frame = tk.Frame(settings_frame, bg=self.bg_color)
-        speed_frame.pack(fill=tk.X, padx=10, pady=5)
-        tk.Label(speed_frame, text="Скорость:", bg=self.bg_color, fg=self.fg_color, font=("Arial", 10)).pack(side=tk.LEFT)
-        self.speed_scale = tk.Scale(speed_frame, from_=-10, to=10, orient=tk.HORIZONTAL,
-                                    command=self.change_speed, bg=self.bg_color, fg=self.fg_color,
-                                    highlightthickness=0, length=250)
-        self.speed_scale.pack(side=tk.LEFT, padx=10)
-        self.speed_label = tk.Label(speed_frame, text="Скорость: 0", bg=self.bg_color, fg=self.fg_color, font=("Arial", 10))
-        self.speed_label.pack(side=tk.LEFT)
+        speed_row = tk.Frame(settings_card, bg=self.colors["panel"])
+        speed_row.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(
+            speed_row,
+            text="Скорость",
+            bg=self.colors["panel"],
+            fg=self.colors["text"],
+            font=("Segoe UI", 11, "bold"),
+            width=12,
+            anchor="w",
+        ).pack(side=tk.LEFT)
 
-        vol_frame = tk.Frame(settings_frame, bg=self.bg_color)
-        vol_frame.pack(fill=tk.X, padx=10, pady=5)
-        tk.Label(vol_frame, text="Громкость:", bg=self.bg_color, fg=self.fg_color, font=("Arial", 10)).pack(side=tk.LEFT)
-        self.volume_scale = tk.Scale(vol_frame, from_=0, to=100, orient=tk.HORIZONTAL,
-                                     command=self.change_volume, bg=self.bg_color, fg=self.fg_color,
-                                     highlightthickness=0, length=250)
-        self.volume_scale.pack(side=tk.LEFT, padx=10)
-        self.volume_label = tk.Label(vol_frame, text="Громкость: 100%", bg=self.bg_color, fg=self.fg_color, font=("Arial", 10))
-        self.volume_label.pack(side=tk.LEFT)
+        self.speed_scale = tk.Scale(
+            speed_row,
+            from_=-10,
+            to=10,
+            orient=tk.HORIZONTAL,
+            command=self.change_speed,
+            bg=self.colors["panel"],
+            fg=self.colors["text"],
+            troughcolor=self.colors["panel_2"],
+            activebackground=self.colors["accent"],
+            highlightthickness=0,
+            length=360,
+            showvalue=False,
+        )
+        self.speed_scale.pack(side=tk.LEFT, padx=(0, 12))
 
-        voice_frame = tk.Frame(settings_frame, bg=self.bg_color)
-        voice_frame.pack(fill=tk.X, padx=10, pady=5)
-        tk.Label(voice_frame, text="Голос:", bg=self.bg_color, fg=self.fg_color, font=("Arial", 10)).pack(side=tk.LEFT)
-        self.voice_combo = ttk.Combobox(voice_frame, state="readonly", width=40)
-        self.voice_combo.pack(side=tk.LEFT, padx=10)
+        self.speed_value_label = tk.Label(
+            speed_row,
+            text="0",
+            bg=self.colors["panel_2"],
+            fg=self.colors["text"],
+            font=("Segoe UI", 11, "bold"),
+            width=5,
+            pady=6,
+        )
+        self.speed_value_label.pack(side=tk.LEFT)
+
+        volume_row = tk.Frame(settings_card, bg=self.colors["panel"])
+        volume_row.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(
+            volume_row,
+            text="Громкость",
+            bg=self.colors["panel"],
+            fg=self.colors["text"],
+            font=("Segoe UI", 11, "bold"),
+            width=12,
+            anchor="w",
+        ).pack(side=tk.LEFT)
+
+        self.volume_scale = tk.Scale(
+            volume_row,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            command=self.change_volume,
+            bg=self.colors["panel"],
+            fg=self.colors["text"],
+            troughcolor=self.colors["panel_2"],
+            activebackground=self.colors["accent"],
+            highlightthickness=0,
+            length=360,
+            showvalue=False,
+        )
+        self.volume_scale.pack(side=tk.LEFT, padx=(0, 12))
+
+        self.volume_value_label = tk.Label(
+            volume_row,
+            text="100%",
+            bg=self.colors["panel_2"],
+            fg=self.colors["text"],
+            font=("Segoe UI", 11, "bold"),
+            width=5,
+            pady=6,
+        )
+        self.volume_value_label.pack(side=tk.LEFT)
+
+        voice_row = tk.Frame(settings_card, bg=self.colors["panel"])
+        voice_row.pack(fill=tk.X)
+        tk.Label(
+            voice_row,
+            text="Голос",
+            bg=self.colors["panel"],
+            fg=self.colors["text"],
+            font=("Segoe UI", 11, "bold"),
+            width=12,
+            anchor="w",
+        ).pack(side=tk.LEFT)
+
+        self.voice_combo = ttk.Combobox(voice_row, state="readonly", width=58, font=("Segoe UI", 11))
+        self.voice_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.voice_combo.bind("<<ComboboxSelected>>", self.change_voice)
 
         # Лог
-        log_frame = tk.LabelFrame(main_frame, text="Лог произнесённого", font=("Arial", 12),
-                                  bg=self.bg_color, fg=self.fg_color, bd=2, relief=tk.GROOVE)
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.log_text = tk.Text(log_frame, bg=self.entry_bg, fg=self.fg_color, font=("Consolas", 10),
-                                wrap=tk.WORD, height=8)
-        scrollbar = tk.Scrollbar(log_frame, command=self.log_text.yview)
+        log_card_outer = tk.Frame(
+            main_frame,
+            bg=self.colors["panel"],
+            highlightbackground=self.colors["border"],
+            highlightthickness=1,
+            bd=0,
+        )
+        log_card_outer.pack(fill=tk.BOTH, expand=True, pady=8)
+
+        log_header = tk.Label(
+            log_card_outer,
+            text="Журнал",
+            bg=self.colors["panel"],
+            fg=self.colors["text"],
+            font=("Segoe UI", 13, "bold"),
+            anchor="w",
+        )
+        log_header.pack(fill=tk.X, padx=16, pady=(14, 6))
+
+        log_body = tk.Frame(log_card_outer, bg=self.colors["panel"])
+        log_body.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+
+        self.log_text = tk.Text(
+            log_body,
+            bg=self.colors["entry"],
+            fg=self.colors["muted"],
+            insertbackground=self.colors["text"],
+            font=("Consolas", 10),
+            wrap=tk.WORD,
+            relief=tk.FLAT,
+            bd=0,
+            height=9,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["accent"],
+        )
+
+        scrollbar = tk.Scrollbar(log_body, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Подсказка
-        hint_label = tk.Label(main_frame, text="Горячие клавиши: Ctrl+Shift+R (страница) | F (фокус) | X (под курсором) | A (адрес) | S (стоп)",
-                              bg=self.bg_color, fg="#aaaaaa", font=("Arial", 9))
-        hint_label.pack(pady=5)
+        hint = tk.Label(
+            main_frame,
+            text=(
+                "Горячие клавиши: Ctrl+Shift+R — страница | "
+                "Ctrl+Shift+F — фокус | X — под курсором | "
+                "Ctrl+Shift+S — стоп"
+            ),
+            bg=self.colors["bg"],
+            fg=self.colors["muted"],
+            font=("Segoe UI", 10),
+            anchor="w",
+        )
+        hint.pack(fill=tk.X, pady=(4, 0))
+
+    def on_close(self):
+        try:
+            self.stop_reading()
+        except Exception:
+            pass
+
+        try:
+            keyboard.unhook_all_hotkeys()
+        except Exception:
+            pass
+
+        self.root.destroy()
+
 
 if __name__ == "__main__":
     root = tk.Tk()

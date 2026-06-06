@@ -20,8 +20,10 @@ class ScreenReaderApp:
     вместе с вкладками, адресной строкой и панелью кнопок.
     """
 
-    MAX_READ_CHARS = 8000
-    MAX_TREE_NODES = 2500
+    MAX_READ_CHARS = 9000
+    # Чем меньше лимит обхода UIA-дерева, тем меньше тормозов на тяжёлых страницах.
+    # Основной способ чтения страницы ниже — быстрый: через выделение и копирование текста страницы.
+    MAX_TREE_NODES = 1200
 
     CONTENT_CONTROL_TYPES = {
         "TextControl",
@@ -118,12 +120,12 @@ class ScreenReaderApp:
 
         self.log(
             "Диктор запущен. Горячие клавиши активны.\n"
-            "x — читать содержимое страницы\n"
-            "c — читать элемент в фокусе\n"
-            "v — читать элемент под курсором мыши\n"
-            "q — остановить чтение\n"
-            "w — прочитать адрес / заголовок страницы\n"
-            "e — озвучить список горячих клавиш"
+            "CapsLock+Стрелка вниз — читать содержимое страницы\n"
+            "CapsLock+Tab — читать элемент в фокусе\n"
+            "CapsLock+Стрелка вверх — читать элемент под курсором мыши\n"
+            "CapsLock+Пробел — остановить чтение\n"
+            "CapsLock+A — прочитать адрес страницы\n"
+            "CapsLock+H — озвучить список горячих клавиш"
         )
 
     # ---------------------- Оформление ----------------------
@@ -212,12 +214,12 @@ class ScreenReaderApp:
 
     def create_hotkeys_column(self, parent):
         hotkeys = [
-            ("Читать страницу", "Ctrl + Alt + 1"),
-            ("Читать фокус", "Ctrl + Alt + 2"),
-            ("Под курсором", "Ctrl + Alt + 3"),
-            ("Остановить", "Ctrl + Alt + 0"),
-            ("Адрес страницы", "Ctrl + Alt + 4"),
-            ("Подсказка", "Ctrl + Alt + 5"),
+            ("Читать страницу", "CapsLock + ↓"),
+            ("Читать фокус", "CapsLock + Tab"),
+            ("Под курсором", "CapsLock + ↑"),
+            ("Остановить", "CapsLock + Space"),
+            ("Адрес страницы", "CapsLock + A"),
+            ("Подсказка", "CapsLock + H"),
         ]
 
         card = tk.Frame(
@@ -241,7 +243,7 @@ class ScreenReaderApp:
 
         subtitle = tk.Label(
             card,
-            text="Цифровые сочетания не зависят от русской/английской раскладки и не совпадают с обновлением страницы.",
+            text="CapsLock работает как отдельная клавиша диктора: сочетания не пересекаются с обновлением страницы, вкладками и адресной строкой браузера.",
             bg=self.colors["panel"],
             fg=self.colors["muted"],
             font=("Segoe UI", 9),
@@ -334,12 +336,12 @@ class ScreenReaderApp:
             return wrapper
 
         try:
-            keyboard.add_hotkey("x", safe_handler(self.read_browser_content))
-            keyboard.add_hotkey("c", safe_handler(self.read_focused_element))
-            keyboard.add_hotkey("v", safe_handler(self.read_element_under_cursor))
-            keyboard.add_hotkey("q", safe_handler(self.stop_reading))
-            keyboard.add_hotkey("w", safe_handler(self.read_current_url))
-            keyboard.add_hotkey("e", safe_handler(self.read_hotkeys_help))
+            keyboard.add_hotkey("caps lock+down", safe_handler(self.read_browser_content), suppress=True)
+            keyboard.add_hotkey("caps lock+tab", safe_handler(self.read_focused_element), suppress=True)
+            keyboard.add_hotkey("caps lock+up", safe_handler(self.read_element_under_cursor), suppress=True)
+            keyboard.add_hotkey("caps lock+space", safe_handler(self.stop_reading), suppress=True)
+            keyboard.add_hotkey("caps lock+a", safe_handler(self.read_current_url), suppress=True)
+            keyboard.add_hotkey("caps lock+h", safe_handler(self.read_hotkeys_help), suppress=True)
         except Exception as e:
             messagebox.showwarning(
                 "Предупреждение",
@@ -411,6 +413,104 @@ class ScreenReaderApp:
         except Exception:
             return None
 
+    def safe_get_class_name(self, elem):
+        try:
+            return elem.ClassName or ""
+        except Exception:
+            return ""
+
+    def safe_get_parent(self, elem):
+        if not elem:
+            return None
+        for method_name in ("GetParentControl", "GetParent"):
+            try:
+                method = getattr(elem, method_name, None)
+                if method:
+                    return method()
+            except Exception:
+                pass
+        try:
+            return elem.ParentControl
+        except Exception:
+            return None
+
+    def activate_control(self, elem):
+        """Активирует окно/элемент, но не падает, если UIA не разрешает фокус."""
+        if not elem:
+            return False
+
+        ok = False
+        for method_name in ("SetActive", "SetFocus"):
+            try:
+                method = getattr(elem, method_name, None)
+                if method:
+                    method()
+                    ok = True
+                    time.sleep(0.08)
+            except Exception:
+                pass
+        return ok
+
+    def get_clipboard_text(self):
+        try:
+            return self.root.clipboard_get()
+        except Exception:
+            return None
+
+    def set_clipboard_text(self, text):
+        try:
+            self.root.clipboard_clear()
+            if text is not None:
+                self.root.clipboard_append(text)
+            self.root.update()
+            return True
+        except Exception:
+            return False
+
+    def looks_like_url(self, text):
+        text = self.clean_text(text)
+        if not text:
+            return False
+        if re.match(r"^https?://\S+$", text, flags=re.IGNORECASE):
+            return True
+        if re.match(r"^(www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(/\S*)?$", text):
+            return True
+        return False
+
+    def looks_like_browser_window(self, elem):
+        if not elem:
+            return False
+        class_name = self.safe_get_class_name(elem)
+        title = self.safe_get_name(elem).lower()
+
+        browser_title_words = (
+            "google chrome",
+            "chrome",
+            "microsoft edge",
+            "edge",
+            "firefox",
+            "mozilla",
+            "yandex",
+            "яндекс",
+            "браузер",
+        )
+
+        if class_name in self.BROWSER_CLASSES and any(word in title for word in browser_title_words):
+            return True
+
+        # У Chrome/Edge/Яндекс окно почти всегда Chrome_WidgetWin_1, но часть браузеров
+        # может не писать название браузера в заголовок. Поэтому оставляем такой кандидат,
+        # если это верхнеуровневое окно с содержательным заголовком.
+        if class_name in {"MozillaWindowClass", "YandexBrowserWidgetWin"}:
+            return True
+
+        if class_name == "Chrome_WidgetWin_1" and title and not any(
+            bad in title for bad in ("visual studio code", "discord", "telegram", "slack")
+        ):
+            return True
+
+        return any(word in title for word in browser_title_words)
+
     def rect_size(self, rect):
         if not rect:
             return 0, 0
@@ -440,28 +540,73 @@ class ScreenReaderApp:
 
     # ---------------------- Поиск браузера и страницы ----------------------
 
+    def get_top_level_from_control(self, ctrl):
+        """Поднимается от элемента в фокусе к верхнему окну приложения."""
+        if not ctrl:
+            return None
+
+        current = ctrl
+        last = ctrl
+        for _ in range(12):
+            parent = self.safe_get_parent(current)
+            if not parent:
+                break
+            name = self.safe_get_name(parent)
+            control_type = self.safe_get_control_type(parent)
+            class_name = self.safe_get_class_name(parent)
+            if control_type == "WindowControl" or class_name in self.BROWSER_CLASSES:
+                last = parent
+            current = parent
+        return last
+
     def get_browser_window(self):
-        for class_name in self.BROWSER_CLASSES:
-            try:
-                win = auto.Control(ClassName=class_name, Name=".*", depth=1)
-                if win.Exists(1, 0.3):
-                    return win
-            except Exception:
+        """
+        Надёжный поиск браузера.
+
+        Старый вариант искал браузер только по классу окна. Из-за этого программа часто
+        видела браузер только после открытия ссылки из самой программы. Новый порядок:
+        1. Берём активный/фокусный элемент и поднимаемся к его окну.
+        2. Если это браузер — используем его.
+        3. Если нет — перебираем все верхнеуровневые окна Windows.
+        """
+        candidates = []
+
+        for getter in (
+            getattr(auto, "GetForegroundControl", None),
+            getattr(auto, "GetFocusedControl", None),
+        ):
+            if not getter:
                 continue
+            try:
+                ctrl = getter()
+                top = self.get_top_level_from_control(ctrl)
+                if top and self.looks_like_browser_window(top):
+                    self.log(f"Найден активный браузер: {self.safe_get_name(top)}")
+                    return top
+            except Exception:
+                pass
 
         try:
-            for win in auto.GetRootControl().GetChildren():
+            root = auto.GetRootControl()
+            for win in root.GetChildren():
                 try:
-                    title = self.safe_get_name(win).lower()
-                    class_name = getattr(win, "ClassName", "") or ""
-                    if any(b in title for b in ["chrome", "firefox", "edge", "mozilla", "yandex", "браузер"]):
-                        return win
-                    if class_name in self.BROWSER_CLASSES:
-                        return win
+                    if self.looks_like_browser_window(win):
+                        candidates.append(win)
                 except Exception:
                     continue
         except Exception:
             pass
+
+        if candidates:
+            # Предпочитаем окно с самым большим прямоугольником: обычно это открытый браузер,
+            # а не маленькое всплывающее окно.
+            candidates.sort(
+                key=lambda w: self.rect_size(self.safe_get_rect(w))[0] * self.rect_size(self.safe_get_rect(w))[1],
+                reverse=True,
+            )
+            browser = candidates[0]
+            self.log(f"Найден браузер среди открытых окон: {self.safe_get_name(browser)}")
+            return browser
 
         return None
 
@@ -549,35 +694,84 @@ class ScreenReaderApp:
 
     # ---------------------- АДРЕС / ЗАГОЛОВОК ----------------------
 
+    def get_address_from_accessibility(self, browser):
+        """Пытается прочитать адрес из EditControl адресной строки через UI Automation."""
+        address_name_words = (
+            "address",
+            "search",
+            "omnibox",
+            "адрес",
+            "поиск",
+            "введите поисковый запрос",
+            "enter web address",
+        )
+
+        for ctrl, _ in self.iter_controls(browser, max_depth=8):
+            try:
+                if self.safe_get_control_type(ctrl) != "EditControl":
+                    continue
+
+                name = self.clean_text(self.safe_get_name(ctrl))
+                value = self.clean_text(self.safe_get_value(ctrl))
+                haystack = f"{name} {value}".lower()
+
+                if not any(word in haystack for word in address_name_words):
+                    continue
+
+                # В адресной строке настоящий URL чаще всего лежит в ValuePattern.
+                if value and not self.is_probably_browser_ui_text(value):
+                    return value
+            except Exception:
+                continue
+
+        return None
+
+    def copy_address_from_browser(self, browser):
+        """
+        Резервный способ чтения адреса: активируем браузер, жмём Ctrl+L, Ctrl+C,
+        читаем буфер обмена и возвращаем старое содержимое буфера.
+        """
+        old_clipboard = self.get_clipboard_text()
+
+        try:
+            self.activate_control(browser)
+            keyboard.press_and_release("ctrl+l")
+            time.sleep(0.12)
+            keyboard.press_and_release("ctrl+c")
+            time.sleep(0.12)
+
+            copied = self.clean_text(self.get_clipboard_text())
+            if copied and not self.is_probably_browser_ui_text(copied):
+                return copied
+        except Exception as e:
+            self.log(f"Резервное копирование адреса не сработало: {e}")
+        finally:
+            # Не портим пользователю буфер обмена.
+            if old_clipboard is not None:
+                self.set_clipboard_text(old_clipboard)
+
+        return None
+
     def get_browser_address(self):
-        """
-        В этой версии адрес берётся из заголовка окна, если браузер отдаёт его через UIA.
-        Для чтения самой страницы эта функция не используется.
-        """
         browser = self.get_browser_window()
         if not browser:
             return None
 
+        # 1. Сначала пробуем получить URL без изменения фокуса.
+        address = self.get_address_from_accessibility(browser)
+        if address:
+            return address
+
+        # 2. Если браузер не отдаёт адрес через UIA — используем Ctrl+L/Ctrl+C.
+        address = self.copy_address_from_browser(browser)
+        if address:
+            return address
+
+        # 3. Последний fallback — заголовок окна. Это не URL, но лучше, чем ничего.
         try:
-            title = self.safe_get_name(browser)
-            if not title:
-                return None
-
-            url_match = re.search(r"https?://[^\s]+", title)
-            if url_match:
-                return url_match.group(0)
-
-            www_match = re.search(r"www\.[^\s]+", title)
-            if www_match:
-                return f"https://{www_match.group(0)}"
-
-            domain_match = re.search(r"([a-zA-Z0-9-]+\.[a-zA-Z]{2,})(?:/|$|\s)", title)
-            if domain_match:
-                return f"https://{domain_match.group(1)}"
-
-            return title.strip()
-        except Exception as e:
-            self.log(f"Ошибка чтения адреса / заголовка: {e}")
+            title = self.clean_text(self.safe_get_name(browser))
+            return title or None
+        except Exception:
             return None
 
     # ---------------------- Сбор текста ----------------------
@@ -665,30 +859,112 @@ class ScreenReaderApp:
 
         return self.merge_text_fragments(texts)
 
+    # ---------------------- Быстрое чтение страницы через буфер ----------------------
+
+    def focus_page_area(self, browser, page_root=None):
+        """
+        Ставит фокус в область страницы, а не в адресную строку.
+        Это нужно, чтобы Ctrl+A/Ctrl+C копировали текст страницы, а не URL.
+        """
+        self.activate_control(browser)
+
+        target = page_root or self.get_page_content_root(browser)
+        if target:
+            self.activate_control(target)
+            rect = self.safe_get_rect(target)
+        else:
+            rect = self.safe_get_rect(browser)
+
+        if rect:
+            left, top, right, bottom = rect
+            width = max(1, right - left)
+            height = max(1, bottom - top)
+
+            # Клик не в самый верх: так меньше шанс попасть в вкладки/адресную строку.
+            x = left + width // 2
+            y = top + min(max(140, height // 4), max(150, height - 80))
+
+            try:
+                if hasattr(auto, "Click"):
+                    auto.Click(x, y)
+                else:
+                    target.Click() if target else browser.Click()
+                time.sleep(0.12)
+                return True
+            except Exception:
+                pass
+
+        return target is not None
+
+    def copy_page_text_via_browser(self, browser, page_root=None):
+        """
+        Самый быстрый и практичный способ получить текст страницы:
+        активируем область сайта, выделяем всё и копируем. Браузер копирует именно
+        текст DOM/страницы, а не панель браузера.
+        """
+        old_clipboard = self.get_clipboard_text()
+        copied = ""
+
+        try:
+            self.focus_page_area(browser, page_root)
+
+            # Esc убирает подсказки адресной строки/всплывающие меню, если они открыты.
+            keyboard.press_and_release("esc")
+            time.sleep(0.05)
+            keyboard.press_and_release("ctrl+a")
+            time.sleep(0.12)
+            keyboard.press_and_release("ctrl+c")
+            time.sleep(0.18)
+
+            copied = self.clean_text(self.get_clipboard_text())
+        except Exception as e:
+            self.log(f"Быстрое копирование текста страницы не сработало: {e}")
+        finally:
+            # Возвращаем пользователю прежний буфер обмена.
+            if old_clipboard is not None:
+                self.set_clipboard_text(old_clipboard)
+
+        if not copied:
+            return ""
+
+        # Защита: если скопировался только URL из адресной строки, это не текст страницы.
+        if self.looks_like_url(copied) and len(copied) < 300:
+            return ""
+
+        # Защита от мусора из панели браузера.
+        if self.is_probably_browser_ui_text(copied) and len(copied) < 500:
+            return ""
+
+        return copied
+
     # ---------------------- Функции чтения ----------------------
 
     def read_browser_content(self):
         browser = self.get_browser_window()
         if not browser:
-            self.speak("Браузер не найден. Откройте Chrome, Firefox, Edge или Яндекс Браузер.")
-            return
-
-        time.sleep(0.2)
-
-        page_root = self.get_page_content_root(browser)
-        if not page_root:
             self.speak(
-                "Не удалось отделить содержимое страницы от интерфейса браузера. "
-                "Откройте страницу, дождитесь загрузки и нажмите на область сайта."
+                "Браузер не найден. Перейдите в уже открытый Chrome, Firefox, Edge или Яндекс Браузер "
+                "и снова нажмите горячую клавишу."
             )
             return
 
-        full_text = self.get_text_from_page_root(page_root)
+        self.log("Начинаю чтение содержимого страницы.")
+        page_root = self.get_page_content_root(browser)
+
+        # 1. Быстрый способ: браузер сам копирует текст страницы через Ctrl+A/Ctrl+C.
+        # Это обычно быстрее и чище, чем медленно обходить всё дерево UI Automation.
+        full_text = self.copy_page_text_via_browser(browser, page_root)
+
+        # 2. Резервный способ: если копирование не сработало, читаем через UIA.
+        if not full_text and page_root:
+            self.log("Быстрый способ не дал текста. Пробую чтение через дерево доступности.")
+            full_text = self.get_text_from_page_root(page_root)
 
         if not full_text:
             self.speak(
-                "Текст на странице не найден. Возможно, сайт скрывает текст от системной доступности "
-                "или страница ещё не загрузилась."
+                "Текст страницы не найден. Откройте нужную вкладку, нажмите мышкой по области сайта "
+                "и повторите чтение. Если сайт сделан картинками или плохо поддерживает доступность, "
+                "текст может быть недоступен."
             )
             return
 
@@ -744,12 +1020,12 @@ class ScreenReaderApp:
     def read_hotkeys_help(self):
         help_text = (
             "Горячие клавиши. "
-            "Контрол Альт один — читать содержимое страницы. "
-            "Контрол Альт два — читать элемент в фокусе. "
-            "Контрол Альт три — читать элемент под курсором мыши. "
-            "Контрол Альт ноль — остановить чтение. "
-            "Контрол Альт четыре — прочитать адрес или заголовок страницы. "
-            "Контрол Альт пять — озвучить эту подсказку."
+            "Капс Лок и стрелка вниз — читать содержимое страницы. "
+            "Капс Лок и Таб — читать элемент в фокусе. "
+            "Капс Лок и стрелка вверх — читать элемент под курсором мыши. "
+            "Капс Лок и пробел — остановить чтение. "
+            "Капс Лок и А — прочитать адрес страницы. "
+            "Капс Лок и Эйч — озвучить эту подсказку."
         )
         self.speak(help_text)
 
@@ -822,7 +1098,7 @@ class ScreenReaderApp:
 
         subtitle = tk.Label(
             main_frame,
-            text="Высококонтрастный интерфейс. Чтение страницы без адресной строки и панели браузера.",
+            text="Высококонтрастный интерфейс. Быстрое чтение текста страницы без вкладок, адресной строки и панели браузера.",
             font=("Segoe UI", 11),
             bg=self.colors["bg"],
             fg=self.colors["muted"],
@@ -1051,7 +1327,7 @@ class ScreenReaderApp:
 
         hint = tk.Label(
             left_column,
-            text="Подсказка: Ctrl+Alt+1 читает страницу, Ctrl+Alt+0 останавливает, Ctrl+Alt+5 озвучивает все горячие клавиши.",
+            text="Подсказка: CapsLock+↓ читает страницу, CapsLock+Space останавливает, CapsLock+H озвучивает все горячие клавиши.",
             bg=self.colors["bg"],
             fg=self.colors["muted"],
             font=("Segoe UI", 10),

@@ -72,17 +72,17 @@ class ScreenReaderApp:
     )
 
     BROWSER_CLASSES = [
-        "Chrome_WidgetWin_1",        
-        "MozillaWindowClass",        
-        "ApplicationFrameWindow",    
+        "Chrome_WidgetWin_1",        # Chrome, Edge, Яндекс
+        "MozillaWindowClass",        # Firefox
+        "ApplicationFrameWindow",    # Edge / UWP-окна
         "YandexBrowserWidgetWin",
     ]
 
     def __init__(self, root):
         self.root = root
         self.root.title("Диктор веб-страниц")
-        self.root.geometry("860x760")
-        self.root.minsize(760, 620)
+        self.root.geometry("1080x780")
+        self.root.minsize(920, 650)
 
         self.colors = {
             "bg": "#0f172a",
@@ -112,16 +112,18 @@ class ScreenReaderApp:
         self.speed_scale.set(0)
         self.volume_scale.set(100)
         self.setup_hotkeys()
+        self.root.bind("<Escape>", lambda event: self.stop_reading())
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.log(
             "Диктор запущен. Горячие клавиши активны.\n"
-            "q — читать содержимое страницы\n"
-            "o — читать элемент в фокусе\n"
-            "Ctrl+Shift+X или X — читать элемент под курсором\n"
-            "S — остановить чтение\n"
-            "A — прочитать адрес / заголовок страницы"
+            "x — читать содержимое страницы\n"
+            "c — читать элемент в фокусе\n"
+            "v — читать элемент под курсором мыши\n"
+            "q — остановить чтение\n"
+            "w — прочитать адрес / заголовок страницы\n"
+            "e — озвучить список горячих клавиш"
         )
 
     # ---------------------- Оформление ----------------------
@@ -208,6 +210,116 @@ class ScreenReaderApp:
             highlightcolor=self.colors["accent"],
         )
 
+    def create_hotkeys_column(self, parent):
+        hotkeys = [
+            ("Читать страницу", "Ctrl + Alt + 1"),
+            ("Читать фокус", "Ctrl + Alt + 2"),
+            ("Под курсором", "Ctrl + Alt + 3"),
+            ("Остановить", "Ctrl + Alt + 0"),
+            ("Адрес страницы", "Ctrl + Alt + 4"),
+            ("Подсказка", "Ctrl + Alt + 5"),
+        ]
+
+        card = tk.Frame(
+            parent,
+            bg=self.colors["panel"],
+            highlightbackground=self.colors["border"],
+            highlightthickness=1,
+            bd=0,
+        )
+        card.pack(fill=tk.BOTH, expand=True)
+
+        title = tk.Label(
+            card,
+            text="Горячие клавиши",
+            bg=self.colors["panel"],
+            fg=self.colors["text"],
+            font=("Segoe UI", 14, "bold"),
+            anchor="w",
+        )
+        title.pack(fill=tk.X, padx=14, pady=(14, 4))
+
+        subtitle = tk.Label(
+            card,
+            text="Цифровые сочетания не зависят от русской/английской раскладки и не совпадают с обновлением страницы.",
+            bg=self.colors["panel"],
+            fg=self.colors["muted"],
+            font=("Segoe UI", 9),
+            justify=tk.LEFT,
+            wraplength=230,
+            anchor="w",
+        )
+        subtitle.pack(fill=tk.X, padx=14, pady=(0, 12))
+
+        header = tk.Frame(card, bg=self.colors["panel_2"])
+        header.pack(fill=tk.X, padx=14, pady=(0, 4))
+
+        tk.Label(
+            header,
+            text="Действие",
+            bg=self.colors["panel_2"],
+            fg=self.colors["text"],
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            width=15,
+            padx=8,
+            pady=7,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tk.Label(
+            header,
+            text="Клавиши",
+            bg=self.colors["panel_2"],
+            fg=self.colors["text"],
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            width=17,
+            padx=8,
+            pady=7,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        for action, keys in hotkeys:
+            row = tk.Frame(card, bg=self.colors["panel"])
+            row.pack(fill=tk.X, padx=14, pady=3)
+
+            tk.Label(
+                row,
+                text=action,
+                bg=self.colors["panel"],
+                fg=self.colors["muted"],
+                font=("Segoe UI", 9),
+                anchor="w",
+                width=15,
+                padx=8,
+                pady=6,
+                wraplength=95,
+                justify=tk.LEFT,
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            tk.Label(
+                row,
+                text=keys,
+                bg=self.colors["entry"],
+                fg=self.colors["text"],
+                font=("Consolas", 9, "bold"),
+                anchor="w",
+                width=17,
+                padx=8,
+                pady=6,
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        warning = tk.Label(
+            card,
+            text="Одиночные клавиши убраны. Esc останавливает чтение только когда открыто окно приложения.",
+            bg=self.colors["panel"],
+            fg=self.colors["muted"],
+            font=("Segoe UI", 9),
+            justify=tk.LEFT,
+            wraplength=230,
+            anchor="w",
+        )
+        warning.pack(fill=tk.X, padx=14, pady=(14, 0))
+
     # ---------------------- Горячие клавиши ----------------------
 
     def setup_hotkeys(self):
@@ -222,13 +334,12 @@ class ScreenReaderApp:
             return wrapper
 
         try:
-            keyboard.add_hotkey("q", safe_handler(self.read_browser_content))
-            keyboard.add_hotkey("o", safe_handler(self.read_focused_element))
-            keyboard.add_hotkey("k", safe_handler(self.read_element_under_cursor))
-            keyboard.add_hotkey("ctrl+shift+x", safe_handler(self.read_element_under_cursor))
-            keyboard.add_hotkey("x", safe_handler(self.read_element_under_cursor))
-            keyboard.add_hotkey("s", safe_handler(self.stop_reading))
-            keyboard.add_hotkey("a", safe_handler(self.read_current_url))
+            keyboard.add_hotkey("x", safe_handler(self.read_browser_content))
+            keyboard.add_hotkey("c", safe_handler(self.read_focused_element))
+            keyboard.add_hotkey("v", safe_handler(self.read_element_under_cursor))
+            keyboard.add_hotkey("q", safe_handler(self.stop_reading))
+            keyboard.add_hotkey("w", safe_handler(self.read_current_url))
+            keyboard.add_hotkey("e", safe_handler(self.read_hotkeys_help))
         except Exception as e:
             messagebox.showwarning(
                 "Предупреждение",
@@ -630,6 +741,18 @@ class ScreenReaderApp:
             type_name = self.safe_get_control_type(elem) or "элемент"
             self.speak(f"{type_name}. Текста нет.")
 
+    def read_hotkeys_help(self):
+        help_text = (
+            "Горячие клавиши. "
+            "Контрол Альт один — читать содержимое страницы. "
+            "Контрол Альт два — читать элемент в фокусе. "
+            "Контрол Альт три — читать элемент под курсором мыши. "
+            "Контрол Альт ноль — остановить чтение. "
+            "Контрол Альт четыре — прочитать адрес или заголовок страницы. "
+            "Контрол Альт пять — озвучить эту подсказку."
+        )
+        self.speak(help_text)
+
     def read_current_url(self):
         url = self.get_browser_address()
         if url:
@@ -707,8 +830,19 @@ class ScreenReaderApp:
         )
         subtitle.pack(fill=tk.X, pady=(2, 10))
 
+        content_area = tk.Frame(main_frame, bg=self.colors["bg"])
+        content_area.pack(fill=tk.BOTH, expand=True)
+
+        left_column = tk.Frame(content_area, bg=self.colors["bg"])
+        left_column.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        hotkeys_column = tk.Frame(content_area, bg=self.colors["bg"], width=280)
+        hotkeys_column.pack(side=tk.RIGHT, fill=tk.Y, padx=(14, 0))
+        hotkeys_column.pack_propagate(False)
+        self.create_hotkeys_column(hotkeys_column)
+
         # Адрес
-        url_card = self.create_card(main_frame, "Открыть сайт")
+        url_card = self.create_card(left_column, "Открыть сайт")
         url_row = tk.Frame(url_card, bg=self.colors["panel"])
         url_row.pack(fill=tk.X)
 
@@ -733,7 +867,7 @@ class ScreenReaderApp:
         read_url_btn.pack(side=tk.LEFT)
 
         # Управление чтением
-        control_card = self.create_card(main_frame, "Чтение")
+        control_card = self.create_card(left_column, "Чтение")
         top_buttons = tk.Frame(control_card, bg=self.colors["panel"])
         top_buttons.pack(fill=tk.X)
 
@@ -761,11 +895,22 @@ class ScreenReaderApp:
         )
         read_cursor_btn.pack(side=tk.LEFT, padx=(0, 8), pady=(0, 8))
 
-        stop_btn = self.make_button(control_card, "Остановить чтение", self.stop_reading, "danger")
-        stop_btn.pack(anchor="w", pady=(4, 0))
+        bottom_buttons = tk.Frame(control_card, bg=self.colors["panel"])
+        bottom_buttons.pack(fill=tk.X, pady=(4, 0))
+
+        stop_btn = self.make_button(bottom_buttons, "Остановить чтение", self.stop_reading, "danger")
+        stop_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        hotkeys_help_btn = self.make_button(
+            bottom_buttons,
+            "Озвучить горячие клавиши",
+            self.read_hotkeys_help,
+            "secondary",
+        )
+        hotkeys_help_btn.pack(side=tk.LEFT)
 
         # Настройки речи
-        settings_card = self.create_card(main_frame, "Настройки голоса")
+        settings_card = self.create_card(left_column, "Настройки голоса")
 
         speed_row = tk.Frame(settings_card, bg=self.colors["panel"])
         speed_row.pack(fill=tk.X, pady=(0, 10))
@@ -790,10 +935,10 @@ class ScreenReaderApp:
             troughcolor=self.colors["panel_2"],
             activebackground=self.colors["accent"],
             highlightthickness=0,
-            length=360,
+            length=330,
             showvalue=False,
         )
-        self.speed_scale.pack(side=tk.LEFT, padx=(0, 12))
+        self.speed_scale.pack(side=tk.LEFT, padx=(0, 12), fill=tk.X, expand=True)
 
         self.speed_value_label = tk.Label(
             speed_row,
@@ -829,10 +974,10 @@ class ScreenReaderApp:
             troughcolor=self.colors["panel_2"],
             activebackground=self.colors["accent"],
             highlightthickness=0,
-            length=360,
+            length=330,
             showvalue=False,
         )
-        self.volume_scale.pack(side=tk.LEFT, padx=(0, 12))
+        self.volume_scale.pack(side=tk.LEFT, padx=(0, 12), fill=tk.X, expand=True)
 
         self.volume_value_label = tk.Label(
             volume_row,
@@ -863,7 +1008,7 @@ class ScreenReaderApp:
 
         # Лог
         log_card_outer = tk.Frame(
-            main_frame,
+            left_column,
             bg=self.colors["panel"],
             highlightbackground=self.colors["border"],
             highlightthickness=1,
@@ -905,12 +1050,8 @@ class ScreenReaderApp:
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         hint = tk.Label(
-            main_frame,
-            text=(
-                "Горячие клавиши: Ctrl+Shift+R — страница | "
-                "Ctrl+Shift+F — фокус | X — под курсором | "
-                "Ctrl+Shift+S — стоп"
-            ),
+            left_column,
+            text="Подсказка: Ctrl+Alt+1 читает страницу, Ctrl+Alt+0 останавливает, Ctrl+Alt+5 озвучивает все горячие клавиши.",
             bg=self.colors["bg"],
             fg=self.colors["muted"],
             font=("Segoe UI", 10),
